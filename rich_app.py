@@ -3,8 +3,11 @@ import pandas as pd
 import numpy as np
 from scipy.optimize import minimize
 from scipy.special import gammaln
+import streamlit.components.v1 as components
 
 # Loading ALL Function Definitions
+
+
 def load_and_preprocess_data(file_path):
     """
     Loads the CSV data, preprocesses it by adding month, date, and birthday columns,
@@ -18,7 +21,13 @@ def load_and_preprocess_data(file_path):
 
 
     # Filter DataFrame for customers with birthday '1/1/2018'
+    unique_birthdays = sorted(df['birthday'].dt.date.unique())
+
+
     birthday_filter = pd.Timestamp('2018-01-01')
+    selected_birthday = st.sidebar.selectbox("Select a Birthday", unique_birthdays)
+    birthday_filter = pd.Timestamp(selected_birthday)
+
     df_filtered = df[df['birthday'] == birthday_filter]
     df_filtered.sort_values(by='date', inplace=True)
     return df_filtered
@@ -236,125 +245,187 @@ def calculate_financial_metrics(data, margin=0.20, WACC_monthly=0.0095):
     return data,b0, b1
 # Use in the main function as before
 
+def main_calc(df_filtered):
+
+    grouped_df = calculate_distinct_customer_count(df_filtered)
+    grouped_df['cohort'] = range(len(grouped_df))
+    grouped_df = calculate_alive_percentage(grouped_df)
+
+    # Optimization
+    initial_guess = [1,1]
+    #[st.sidebar.number_input("Enter initial guess for gamma", value=1.0, step=0.1),st.sidebar.number_input("Enter initial guess for delta", value=1.0, step=0.1)]
+    
+    optimized_gamma, optimized_delta = optimize_gamma_delta(grouped_df, initial_guess)
+
+    grouped_df = calculate_values(grouped_df, optimized_gamma, optimized_delta)
+
+    # Extend the cohort values up to 24 using vectorized operations
+    max_cohort = grouped_df['cohort'].max()
+    extended_cohorts = pd.DataFrame({'cohort': range(max_cohort + 1, 120), '%Alive': np.nan})
+    grouped_df = pd.concat([grouped_df, extended_cohorts], ignore_index=True)
+
+    # Calculate E(% Alive) for the entire range of cohorts
+    grouped_df['E(% Alive)'] = e_alive(grouped_df['cohort'], optimized_gamma, optimized_delta)
+
+    # Calculate P(ChurnTime = t) and E(# of Cust)
+    initial_cust_count = grouped_df['distinct_cust_count'].iloc[0]
+    grouped_df['P(ChurnTime = t)'] = grouped_df['E(% Alive)'].diff().fillna(grouped_df['E(% Alive)'].iloc[0])
+    grouped_df['E(# of Cust)'] = initial_cust_count * grouped_df['E(% Alive)']
+
+    # Adding cohort month
+    from pandas.tseries.offsets import MonthBegin
+    start_month = grouped_df['date'].min()
+    grouped_df['cohort_month'] = grouped_df.apply(lambda row: start_month + MonthBegin(n=int(row['cohort'])), axis=1)
+
+    # Final DataFrame
+    updated_sample_data, b0,b1 = calculate_financial_metrics(grouped_df)
+    print(b0)
+
+    # Final DataFrame
+    df_final = grouped_df[['cohort_month', 'cohort', 'total_spend', 'ARPU','distinct_cust_count', '%Alive', 'E(% Alive)', 
+                        'P(ChurnTime = t)', 'E(# of Cust)','Calculated_ARPU', 'E(Total Rev)', 'E(Rev. per Acq. Cust)',
+        'E(Profit per Acq. Cust)', 'PV( E(Profit per Acq. Cust) )']]
+    df_final['P(ChurnTime = t)'] = np.abs(df_final['P(ChurnTime = t)'])
+    df_final['t * P(ChurnTime = t)'] = df_final.apply(calculate_new_column, axis=1)
+    df_final = append_new_row(df_final)
+    # Apply the function to df_final
+    df_final = calculate_conditional_probability(df_final)
+    df_final = calculate_t_times_conditional_probability(df_final)
+    df_final = df_final[['cohort_month', 'cohort','distinct_cust_count','%Alive', 
+                        'E(% Alive)', 'P(ChurnTime = t)', 'E(# of Cust)','t * P(ChurnTime = t)',	'P(churnTime = t | Alive @ 3)','t * P(churnTime = t | Alive @ 3)',
+                        'total_spend', 'ARPU', 'Calculated_ARPU', 'E(Total Rev)', 'E(Rev. per Acq. Cust)','E(Profit per Acq. Cust)', 'PV( E(Profit per Acq. Cust) )']]
+    
+    # Getting some important values: Lifetime, Lifetime_3mo, future_Lifetime
+    e_lifetime_years =calculate_e_lifetime_years(df_final)
+    e_lifetime_years_3mo_v = calculate_e_lifetime_years_3mo(df_final)
+
+    cohort_nr =  3  ### USER SET
+
+    e_future_lifetime_years_3mo = calculate_e_lifetime_years_3mo(df_final) - (cohort_nr/12)
+    e_future_lifetime_years_3mo = e_future_lifetime_years_3mo
+
+
+
+    sse_value_1 = calculate_filtered_sse(df_final, actual_column='distinct_cust_count', predicted_column='E(# of Cust)') # Customer
+
+    sse_value_2 = calculate_filtered_sse(df_final, actual_column='total_spend', predicted_column='E(Total Rev)') # Revenue
+
+# e_lifetime_years, e_lifetime_years_3mo_v, e_future_lifetime_years_3mo, sse_value_1, sse_value_2
+    df_final_1 = df_final[['cohort_month', 'cohort','distinct_cust_count','%Alive', 
+                        'E(% Alive)', 'P(ChurnTime = t)', 'E(# of Cust)','t * P(ChurnTime = t)',	'P(churnTime = t | Alive @ 3)','t * P(churnTime = t | Alive @ 3)']]
+
+    df_final_2 = df_final[['cohort_month', 'cohort','distinct_cust_count','%Alive', 
+                        'total_spend', 'ARPU', 'Calculated_ARPU', 'E(Total Rev)', 'E(Rev. per Acq. Cust)','E(Profit per Acq. Cust)', 'PV( E(Profit per Acq. Cust) )']]
+    return df_final_1, df_final_2, optimized_gamma,optimized_delta,sse_value_1,e_lifetime_years,e_lifetime_years_3mo_v,e_future_lifetime_years_3mo,b0,b1,sse_value_2,grouped_df
+
+# Markdown text
+markdown_text = """
+
+## Overview
+This Project contains an advanced churn analysis project utilizing the Shifted Beta-Geometric (sBG) model. 
+- It's tailored to uncover in-depth insights into customer retention and churn patterns, 
+- particularly beneficial for businesses with subscription-based models. 
+- The project encapsulates a complete workflow from data preprocessing to detailed statistical modeling and financial impact assessment.
+
+## Contents
+- `churn_analysis.py`: The core Python script encompassing all analytical functions and the model.
+- `rich_sample_data.csv`: The sample dataset, forming the basis of our churn analysis.
+
+## Features
+- **Data Preprocessing**: Rigorous data cleaning and preparation, focusing on specific customer segments.
+- **Cohort-Based Analysis**: Detailed grouping of customers to track retention and churn over time.
+- **Survival Analysis via sBG Model**: Implementation and optimization of the sBG model to predict customer lifespan.
+- **Financial Implications**: Comprehensive calculations of key financial metrics like ARPU, lifetime value, and profitability.
+- **Extensive Timeframe Analysis**: Long-term prediction capabilities extending up to 120 months.
+- **Conditional Probability Metrics**: Advanced metrics to understand churn post-initial customer retention period.
+"""
+
+
 
 def main():
-    st.title('Customer Churn Analysis')
-
-    uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
+    
+    st.set_page_config(
+    page_title="Ex-stream-ly Cool App",
+    page_icon="🧊",
+    layout="wide",
+    initial_sidebar_state="expanded",
+    menu_items={
+        'Get Help': 'https://www.extremelycoolapp.com/help',
+        'Report a bug': "https://www.extremelycoolapp.com/bug",
+        'About': "# This is a header. This is an *extremely* cool app!"
+    }
+)   
+    st.title('Customer Churn Analysis Using Shifted Beta-Geometric Model')
+    
+    st.markdown(markdown_text)
+   # iframe_src = "https://open.spotify.com/embed/track/59BweHnnNQc5Y55WO30JuK?utm_source=generator"
+   # components.iframe(iframe_src)
+    st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/b/bc/PS_Logo_RGB.svg/1200px-PS_Logo_RGB.svg.png")
+    uploaded_file = st.sidebar.file_uploader("Choose a CSV file", type="csv")
     if uploaded_file is not None:
-        df_filtered = load_and_preprocess_data(uploaded_file)
+        df = load_and_preprocess_data(uploaded_file)
+        column_names = df.columns.tolist()
+        # User input for column mapping
+        birthday_column = st.sidebar.selectbox("Select the column for 'Birthday'", column_names)
+        date_column = st.sidebar.selectbox("Select the column for 'Date'", column_names)
+        cust_id_column = st.sidebar.selectbox("Select the column for 'Customer ID'", column_names)
+        spend_column = st.sidebar.selectbox("Select the column for 'Spend'", column_names)
+        df_ml = df[[birthday_column, date_column, cust_id_column, spend_column]]
+        #df_filtered = load_and_preprocess_data(df, birthday_column, date_column, cust_id_column, spend_column)
+        #load_and_preprocess_data(uploaded_file)
+
+         # Check if all required columns are selected
+        if birthday_column and date_column and cust_id_column and spend_column:
+            # Now, pass these column names to your processing functions
+            #df_filtered = load_and_preprocess_data(df)
+            if st.sidebar.button('Run Analysis', type="primary"):
+                df_final_1, df_final_2, optimized_gamma,optimized_delta,sse_value_1,e_lifetime_years,e_lifetime_years_3mo_v,e_future_lifetime_years_3mo,b0,b1,sse_value_2,grouped_df = main_calc(df_ml)
+                st.write("")
+                st.write("")
+                st.write("Final Data:")    
+                st.line_chart(grouped_df[['%Alive', 'E(% Alive)']])
+                col1, col2, col3, col4, col5, col6 = st.columns(6)
+                with col1:
+                    st.metric(label="Gamma", value=f"{optimized_gamma:.2f}")
+                with col2:
+                    st.metric(label="Delta", value=f"{optimized_delta:.2f}")
+                with col3:
+                    st.metric(label="SSE for %Alive", value=f"{sse_value_1:.0f}")
+                with col4:
+                    st.metric(label="SSE for %Alive", value=f"{e_lifetime_years:.2f}")
+                with col5:
+                    st.metric(label="SSE for %Alive", value=f"{e_lifetime_years_3mo_v:.2f}")
+                with col6:
+                    st.metric(label="SSE for %Alive", value=f"{e_future_lifetime_years_3mo:.2f}")
+
+                st.write("Final Data:")
+
+                st.dataframe(df_final_1)
+                st.write("")
+                st.write("")
+                st.write("")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric(label="b0",value=f"{b0.pop():.2f}" )
+                with col2:
+                    st.metric(label="b1", value=f"{b1.pop():.2f}" )
+                with col3:
+                    st.metric(label="SSE for Revenue", value=f"{sse_value_2:.0f}")
+                
+
+                st.write("")
+                st.write("")
+                st.write("Final Data:")
+                st.dataframe(df_final_2)
+
+                
+
+            else:
+                # Display a message to select all columns
+                st.warning("Please select all required columns to proceed.")
+        else:
+            st.write('Goodbye')
         
-        grouped_df = calculate_distinct_customer_count(df_filtered)
-        grouped_df['cohort'] = range(len(grouped_df))
-        grouped_df = calculate_alive_percentage(grouped_df)
-
-        # Optimization
-        initial_guess = [st.sidebar.number_input("Enter initial guess for gamma", value=1.0, step=0.1),
-                        st.sidebar.number_input("Enter initial guess for delta", value=1.0, step=0.1)]
-        
-        optimized_gamma, optimized_delta = optimize_gamma_delta(grouped_df, initial_guess)
-
-        grouped_df = calculate_values(grouped_df, optimized_gamma, optimized_delta)
-
-        # Extend the cohort values up to 24 using vectorized operations
-        max_cohort = grouped_df['cohort'].max()
-        extended_cohorts = pd.DataFrame({'cohort': range(max_cohort + 1, 120), '%Alive': np.nan})
-        grouped_df = pd.concat([grouped_df, extended_cohorts], ignore_index=True)
-
-        # Calculate E(% Alive) for the entire range of cohorts
-        grouped_df['E(% Alive)'] = e_alive(grouped_df['cohort'], optimized_gamma, optimized_delta)
-
-        # Calculate P(ChurnTime = t) and E(# of Cust)
-        initial_cust_count = grouped_df['distinct_cust_count'].iloc[0]
-        grouped_df['P(ChurnTime = t)'] = grouped_df['E(% Alive)'].diff().fillna(grouped_df['E(% Alive)'].iloc[0])
-        grouped_df['E(# of Cust)'] = initial_cust_count * grouped_df['E(% Alive)']
-
-        # Adding cohort month
-        from pandas.tseries.offsets import MonthBegin
-        start_month = grouped_df['date'].min()
-        grouped_df['cohort_month'] = grouped_df.apply(lambda row: start_month + MonthBegin(n=int(row['cohort'])), axis=1)
-
-        # Final DataFrame
-        updated_sample_data, b0,b1 = calculate_financial_metrics(grouped_df)
-        print(b0)
-
-        # Final DataFrame
-        df_final = grouped_df[['cohort_month', 'cohort', 'total_spend', 'ARPU','distinct_cust_count', '%Alive', 'E(% Alive)', 
-                            'P(ChurnTime = t)', 'E(# of Cust)','Calculated_ARPU', 'E(Total Rev)', 'E(Rev. per Acq. Cust)',
-            'E(Profit per Acq. Cust)', 'PV( E(Profit per Acq. Cust) )']]
-        df_final['P(ChurnTime = t)'] = np.abs(df_final['P(ChurnTime = t)'])
-        df_final['t * P(ChurnTime = t)'] = df_final.apply(calculate_new_column, axis=1)
-        df_final = append_new_row(df_final)
-        # Apply the function to df_final
-        df_final = calculate_conditional_probability(df_final)
-        df_final = calculate_t_times_conditional_probability(df_final)
-        df_final = df_final[['cohort_month', 'cohort','distinct_cust_count','%Alive', 
-                            'E(% Alive)', 'P(ChurnTime = t)', 'E(# of Cust)','t * P(ChurnTime = t)',	'P(churnTime = t | Alive @ 3)','t * P(churnTime = t | Alive @ 3)',
-                            'total_spend', 'ARPU', 'Calculated_ARPU', 'E(Total Rev)', 'E(Rev. per Acq. Cust)','E(Profit per Acq. Cust)', 'PV( E(Profit per Acq. Cust) )']]
-        
-        # Getting some important values: Lifetime, Lifetime_3mo, future_Lifetime
-        e_lifetime_years =calculate_e_lifetime_years(df_final)
-        e_lifetime_years_3mo_v = calculate_e_lifetime_years_3mo(df_final)
-
-        cohort_nr =  3  ### USER SET
-
-        e_future_lifetime_years_3mo = calculate_e_lifetime_years_3mo(df_final) - (cohort_nr/12)
-        e_future_lifetime_years_3mo = e_future_lifetime_years_3mo
-
-
-
-        sse_value_1 = calculate_filtered_sse(df_final, actual_column='distinct_cust_count', predicted_column='E(# of Cust)') # Customer
-
-        sse_value_2 = calculate_filtered_sse(df_final, actual_column='total_spend', predicted_column='E(Total Rev)') # Revenue
-
-       # e_lifetime_years, e_lifetime_years_3mo_v, e_future_lifetime_years_3mo, sse_value_1, sse_value_2
-        df_final_1 = df_final[['cohort_month', 'cohort','distinct_cust_count','%Alive', 
-                            'E(% Alive)', 'P(ChurnTime = t)', 'E(# of Cust)','t * P(ChurnTime = t)',	'P(churnTime = t | Alive @ 3)','t * P(churnTime = t | Alive @ 3)']]
-
-        df_final_2 = df_final[['cohort_month', 'cohort','distinct_cust_count','%Alive', 
-                            'total_spend', 'ARPU', 'Calculated_ARPU', 'E(Total Rev)', 'E(Rev. per Acq. Cust)','E(Profit per Acq. Cust)', 'PV( E(Profit per Acq. Cust) )']]
-
-        st.write("")
-        st.write("")
-
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        with col1:
-            st.metric(label="Gamma", value=f"{optimized_gamma:.4f}")
-        with col2:
-            st.metric(label="Delta", value=f"{optimized_delta:.4f}")
-        with col3:
-            st.metric(label="SSE for %Alive", value=f"{sse_value_1:.4f}")
-        with col4:
-            st.metric(label="SSE for %Alive", value=f"{e_lifetime_years:.4f}")
-        with col5:
-            st.metric(label="SSE for %Alive", value=f"{e_lifetime_years_3mo_v:.4f}")
-        with col6:
-            st.metric(label="SSE for %Alive", value=f"{e_future_lifetime_years_3mo:.4f}")
-
-        st.write("Final Data:")
-
-        st.dataframe(df_final_1)
-        st.write("")
-        st.write("")
-        st.write("")
-        col1, col2, col3, col4, col5, col6 = st.columns(6)
-        with col1:
-            st.metric(label="b0",value=f"{b0.pop():.4f}" )
-        with col2:
-            st.metric(label="b1", value=f"{b1.pop():.4f}" )
-        with col3:
-            st.metric(label="SSE for Revenue", value=f"{sse_value_2:.4f}")
-        
-
-        st.write("")
-        st.write("")
-        st.write("Final Data:")
-        st.dataframe(df_final_2)
-
-        st.write("Final Data:")    
-        st.line_chart(grouped_df[['%Alive', 'E(% Alive)']])
-
-
 
 if __name__ == '__main__':
     main()
