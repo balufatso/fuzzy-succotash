@@ -392,11 +392,11 @@ def main():
                 with col3:
                     st.metric(label="SSE for %Alive", value=f"{sse_value_1:.0f}")
                 with col4:
-                    st.metric(label="SSE for %Alive", value=f"{e_lifetime_years:.2f}")
+                    st.metric(label="Lifetime(years)", value=f"{e_lifetime_years:.2f}")
                 with col5:
-                    st.metric(label="SSE for %Alive", value=f"{e_lifetime_years_3mo_v:.2f}")
+                    st.metric(label="Lifetime(years) 3M", value=f"{e_lifetime_years_3mo_v:.2f}")
                 with col6:
-                    st.metric(label="SSE for %Alive", value=f"{e_future_lifetime_years_3mo:.2f}")
+                    st.metric(label="Future Lifetime(years) 3M", value=f"{e_future_lifetime_years_3mo:.2f}")
 
                 st.write("Final Data:")
 
